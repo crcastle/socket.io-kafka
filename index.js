@@ -88,7 +88,7 @@ function adapter(uri, options) {
             debug('Consumer initialized')
             self.consumer.subscribe(self.topic, (messageSet, topic, partition) => {
                 messageSet.forEach(m => {
-                    self.onMessage.bind(self, m.message);
+                    self.onMessage(m.message);
                 });
             });  
         })
