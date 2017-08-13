@@ -4,7 +4,10 @@
  * @example <caption>Example usage</caption>
  * var io = require('socket.io')(3000);
  * var kafka = require('socket.io-kafka');
- * io.adapter(kafka('localhost:2181'));
+ * io.adapter(kafka(process.env.KAFKA_URL, {
+ *      topic: process.env.KAFKA_PREFIX+process.env.KAFKA_TOPIC,
+ *      createTopics: false
+ * }));
  *
  * @module socket.io-kafka
  * @see {@link https://www.npmjs.com/package/kafka-node|kafka-node}
@@ -17,16 +20,15 @@
 
 'use strict';
 
-var kafka = require('kafka-node'),
+var kafka = require('no-kafka'),
     Adapter = require('socket.io-adapter'),
     debug = require('debug')('socket.io-kafka'),
-    async = require('async'),
     uid2 = require('uid2');
 
 /**
  * Generator for the kafka Adapater
  *
- * @param {string} optional, zookeeper connection string
+ * @param {string} optional, kafka connection string
  * @param {object} adapter options
  * @return {Kafka} adapter
  * @api public
@@ -46,15 +48,13 @@ function adapter(uri, options) {
 
     // create producer and consumer if they weren't provided
     if (!opts.producer || !opts.consumer) {
-        debug('creating new kafa client');
-        client = new kafka.Client(uri, opts.clientId, { retries: 2 });
         if (!opts.producer) {
-            debug('creating new kafa producer');
-            opts.producer = new kafka.Producer(client);
+            debug('creating new kafka producer');
+            opts.producer = new kafka.Producer({ connectionString: uri });
         }
         if (!opts.consumer) {
-            debug('creating new kafa consumer');
-            opts.consumer = new kafka.Consumer(client, [], { groupId: prefix });
+            debug('creating new kafka consumer');
+            opts.consumer = new kafka.SimpleConsumer({ connectionString: uri });
         }
     }
     /**
@@ -75,18 +75,24 @@ function adapter(uri, options) {
         this.prefix = prefix;
         this.consumer = opts.consumer;
         this.producer = opts.producer;
-        this.mainTopic = prefix + nsp.name;
+        this.topic = opts.topic;
         opts.createTopics = (create === undefined) ? true : create;
 
-        opts.producer.on('ready', function () {
-            debug('producer ready');
-            self.createTopic(self.mainTopic);
-            self.subscribe(self.mainTopic);
-
-            // handle incoming messages to the channel
-            self.consumer.on('message', self.onMessage.bind(self));
-            self.consumer.on('error', self.onError.bind(self));
-        });
+        // TODO: replace this junk with async/await
+        this.producer.init()
+        .then(() => debug('Producer initialized.'))
+        .catch(e => debug('Error initializing producer.', e));
+        
+        this.consumer.init()
+        .then(() => {
+            debug('Consumer initialized')
+            self.consumer.subscribe(self.topic, (messageSet, topic, partition) => {
+                messageSet.forEach(m => {
+                    self.onMessage.bind(self, m.message);
+                });
+            });  
+        })
+        .catch(e => debug('Error initializing consumer', e));
     }
 
     // inherit from Adapter
@@ -140,53 +146,6 @@ function adapter(uri, options) {
     };
 
     /**
-     * Converts a socket.io channel into a safe kafka topic name.
-     *
-     * @param {string} cahnnel name
-     * @return {string} topic name
-     * @api private
-     */
-    Kafka.prototype.safeTopicName = function (channel) {
-        return channel.replace('/', '_');
-    };
-
-    /**
-     * Uses the producer to create a new tpoic synchronously if
-     * options.createTopics is true.
-     *
-     * @param {string} topic to create
-     * @api private
-     */
-    Kafka.prototype.createTopic = function (channel) {
-        var chn = this.safeTopicName(channel);
-
-        debug('creating topic %s', chn);
-        if (this.options.createTopics) {
-            this.producer.createTopics(chn, this.onError.bind(this));
-        }
-    };
-
-    /**
-     * Uses the consumer to subscribe to a topic.
-     *
-     * @param {string} topic to subscribe to
-     * @param {Kafka~subscribeCallback}
-     * @api private
-     */
-    Kafka.prototype.subscribe = function (channel, callback) {
-        var self = this,
-            p = this.options.partition || 0,
-            chn = this.safeTopicName(channel);
-
-        debug('subscribing to %s', chn);
-        self.consumer.addTopics([{topic: chn, partition: p}],
-            function (err) {
-                self.onError(err);
-                if (callback) { callback(err); }
-            });
-    };
-
-    /**
      * Uses the producer to send a message to kafka. Uses snappy compression.
      *
      * @param {string} topic to publish on
@@ -194,16 +153,18 @@ function adapter(uri, options) {
      * @param {object} options
      * @api private
      */
-    Kafka.prototype.publish = function (channel, packet, opts) {
+    Kafka.prototype.publish = function (packet, opts) {
         var self = this,
-            msg = JSON.stringify([self.uid, packet, opts]),
-            chn = this.safeTopicName(channel);
+            msg = JSON.stringify([self.uid, packet, opts]);
 
-        this.producer.send([{ topic: chn, messages: [msg], attributes: 2 }],
-            function (err, data) {
-                debug('new offset in partition:', data);
-                self.onError(err);
-            });
+        // TODO: add back snappy compression
+        this.producer.send({
+          topic: self.topic,
+          partition: 0,
+          message: { value: msg }
+        })
+        .then(result => debug('result:', result))
+        .catch(err => self.onError(err));
     };
 
     /**
@@ -225,8 +186,7 @@ function adapter(uri, options) {
         Adapter.prototype.broadcast.call(this, packet, opts);
 
         if (!remote) {
-            channel = self.safeTopicName(self.mainTopic);
-            self.publish(channel, packet, opts);
+            self.publish(packet, opts);
         }
     };
 
