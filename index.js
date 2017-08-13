@@ -126,7 +126,7 @@ function adapter(uri, options) {
         var message, packet;
 
         try {
-            message = JSON.parse(kafkaMessage.value);
+            message = JSON.parse(kafkaMessage.value.toString('UTF8'));
             if (uid === message[0]) { return debug('ignore same uid'); }
             packet = message[1];
 
